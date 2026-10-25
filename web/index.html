@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>资料问答</title>
+<style>
+  :root {
+    --bg: #f6f5f2;
+    --card: #ffffff;
+    --ink: #1f2328;
+    --muted: #6b7280;
+    --line: #e5e2db;
+    --accent: #2f6f4f;
+    --accent-soft: #eaf2ec;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font: 15px/1.7 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+  }
+  .wrap { max-width: 760px; margin: 0 auto; padding: 48px 20px 80px; }
+  header h1 { font-size: 26px; margin: 0 0 6px; letter-spacing: .5px; }
+  header p { margin: 0 0 4px; color: var(--muted); font-size: 14px; }
+  .status { font-size: 12px; color: var(--muted); margin-top: 10px; }
+
+  .asker {
+    margin-top: 28px;
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 14px;
+    box-shadow: 0 1px 2px rgba(0,0,0,.03);
+  }
+  textarea {
+    width: 100%; border: 0; outline: 0; resize: none;
+    font: inherit; color: var(--ink); background: transparent;
+    min-height: 56px;
+  }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  button {
+    font: inherit; cursor: pointer; border: 0; border-radius: 9px;
+    padding: 8px 18px; background: var(--accent); color: #fff;
+  }
+  button:disabled { opacity: .45; cursor: default; }
+
+  .samples { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+  .chip {
+    font-size: 13px; color: var(--muted); cursor: pointer;
+    background: var(--card); border: 1px solid var(--line);
+    border-radius: 999px; padding: 5px 12px;
+  }
+  .chip:hover { border-color: var(--accent); color: var(--accent); }
+
+  .qa { margin-top: 26px; }
+  .q {
+    font-weight: 600; margin-bottom: 12px;
+    padding-left: 12px; border-left: 3px solid var(--accent);
+  }
+  .a {
+    background: var(--card); border: 1px solid var(--line);
+    border-radius: 14px; padding: 18px 20px; white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .a .refuse { color: var(--muted); }
+
+  .sources { margin-top: 12px; display: grid; gap: 8px; }
+  .src {
+    background: var(--card); border: 1px solid var(--line);
+    border-radius: 10px; padding: 10px 14px; font-size: 13px;
+  }
+  .src .top { display: flex; justify-content: space-between; gap: 10px; color: var(--muted); }
+  .src .top b { color: var(--ink); font-weight: 600; }
+  .bar { height: 3px; background: var(--line); border-radius: 2px; margin: 7px 0 6px; }
+  .bar i { display: block; height: 100%; background: var(--accent); border-radius: 2px; }
+  .src .snip { color: var(--muted); line-height: 1.6; }
+
+  .loading { color: var(--muted); margin-top: 26px; font-size: 14px; }
+  .error { margin-top: 20px; color: #a33; font-size: 14px; }
+  footer { margin-top: 48px; font-size: 12px; color: var(--muted); text-align: center; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>资料问答</h1>
+    <p>只根据 docs/ 里的资料回答，并标注引用来源。</p>
+    <div class="status" id="status">正在连接…</div>
+  </header>
+
+  <div class="asker">
+    <textarea id="q" placeholder="问点什么……（Ctrl + Enter 发送）"></textarea>
+    <div class="row">
+      <span class="status" id="hint"></span>
+      <button id="send">提问</button>
+    </div>
+  </div>
+
+  <div class="samples" id="samples"></div>
+  <div id="out"></div>
+
+  <footer>答案由模型基于检索到的原文生成，请以引用片段为准。</footer>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const qEl = $("q"), btn = $("send"), out = $("out");
+
+function esc(s) {
+  return s.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+}
+// 只处理最基础的 **加粗**，其余按纯文本显示
+function fmt(s) {
+  return esc(s).replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+}
+
+async function boot() {
+  try {
+    const h = await fetch("/health").then((r) => r.json());
+    $("status").textContent = `已索引 ${h.chunks} 块资料`;
+  } catch {
+    $("status").textContent = "服务未响应";
+  }
+  try {
+    const s = await fetch("/samples").then((r) => r.json());
+    $("samples").innerHTML = s.questions
+      .map((q) => `<span class="chip">${esc(q)}</span>`)
+      .join("");
+    document.querySelectorAll(".chip").forEach((el) => {
+      el.onclick = () => { qEl.value = el.textContent; ask(); };
+    });
+  } catch { /* 没有样例就留空 */ }
+}
+
+function render(question, data) {
+  const refused = data.sources.length === 0;
+  const srcs = data.sources.map((s) => `
+    <div class="src">
+      <div class="top">
+        <span><b>[${s.index}]</b> ${esc(s.file)}${s.heading ? " · " + esc(s.heading) : ""}</span>
+        <span>相似度 ${s.score.toFixed(3)}</span>
+      </div>
+      <div class="bar"><i style="width:${Math.max(2, Math.min(100, s.score * 100))}%"></i></div>
+      <div class="snip">${esc(s.snippet)}…</div>
+    </div>`).join("");
+
+  out.insertAdjacentHTML("afterbegin", `
+    <div class="qa">
+      <div class="q">${esc(question)}</div>
+      <div class="a ${refused ? "refuse" : ""}">${fmt(data.answer)}</div>
+      ${srcs ? `<div class="sources">${srcs}</div>` : ""}
+    </div>`);
+}
+
+async function ask() {
+  const question = qEl.value.trim();
+  if (!question) return;
+  btn.disabled = true;
+  $("hint").textContent = "检索中…";
+  try {
+    const res = await fetch("/ask", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ question, k: 3 }),
+    });
+    if (!res.ok) throw new Error((await res.json()).detail || res.statusText);
+    render(question, await res.json());
+    qEl.value = "";
+  } catch (e) {
+    out.insertAdjacentHTML("afterbegin",
+      `<div class="error">出错了：${esc(String(e.message || e))}</div>`);
+  } finally {
+    btn.disabled = false;
+    $("hint").textContent = "";
+  }
+}
+
+btn.onclick = ask;
+qEl.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) ask();
+});
+boot();
+</script>
+</body>
+</html>
